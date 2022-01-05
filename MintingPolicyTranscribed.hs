@@ -15,7 +15,10 @@ data PaymentParams = PaymentParams
       ,pAmount         :: Integer
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
+{-# INLINABLE mkValidator #-}
+mkValidator :: Data -> Data -> Data -> ()
+mkValidator _ _ _ = ()
 
 -- cheack  the amount of ADA sent by the wallet to makes sure its acceptable
-mkCheckForCorrectAmount :: Integer -> Bool
-mkCheckForCorrectAmount amount = (amount == 30)
+CheckForCorrectAmount :: Integer -> Bool
+CheckForCorrectAmount amount = (amount == 30)
