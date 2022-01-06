@@ -17,8 +17,8 @@ data PaymentParams = PaymentParams
 
 {-# INLINABLE mkValidator #-}
 mkValidator :: Data -> Data -> Data -> ()
-mkValidator _ _ _ = ()
+mkValidator _ _ _ = (CheckForCorrectAmount valueSpent)
 
 -- cheack  the amount of ADA sent by the wallet to makes sure its acceptable
-CheckForCorrectAmount :: Integer -> Bool
-CheckForCorrectAmount amount = (amount == 30)
+CheckForCorrectAmount :: Value -> Bool
+CheckForCorrectAmount amount = (amount == (singleton adaSymbol adaToken 30))
