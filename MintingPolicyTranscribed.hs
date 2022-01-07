@@ -20,5 +20,6 @@ mkValidator :: Data -> Data -> Data -> ()
 mkValidator _ _ _ = (CheckForCorrectAmount valueSpent)
 
 -- cheack  the amount of ADA sent by the wallet to makes sure its acceptable
+-- 30000000 is equal to 30 ADA
 CheckForCorrectAmount :: Value -> Bool
-CheckForCorrectAmount amount = (amount == (singleton adaSymbol adaToken 30))
+CheckForCorrectAmount amount = (amount == (singleton adaSymbol adaToken 30000000))
