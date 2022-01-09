@@ -1,14 +1,16 @@
 import Control.Monad (void)
-import Ledger (Address, ScriptContext, valueSpent, ownCurrencySymbol, PaymentPubKeyHash)
+import Ledger (Address, ownCurrencySymbol, PaymentPubKeyHash)
 import Ledger.Constraints qualified as Constraints
 import Ledger.Typed.Scripts qualified as Scripts
 import Ledger.Value (Value, CurrencySymbol, singleton, valueOf)
-import Plutus.V2.Ledger.Api (adaSymbol, adaToken, scriptContextTxInfo, txInfoMint, txOutValue, PubKeyHash, TxInfo, TxOut)
+import Plutus.V2.Ledger.Api (adaSymbol, adaToken, txOutValue, PubKeyHash, TxOut, txInfoOutputs)
+import Ledger.Contexts (valueSpent, ScriptContext(..), TxInfo(..))
 import Playground.Contract
 import Plutus.Contract
 import PlutusTx (CompiledCode)
 import PlutusTx qualified
 import PlutusTx.Prelude hiding (Applicative (..))
+
 
 data ContractInfo = ContractInfo
     { recvPkh :: PaymentPubKeyHash
@@ -21,8 +23,14 @@ contractInfo = ContractInfo
 -- makes sure that all outputs are being sent to the above address
 {-# INLINABLE mkValidator #-}
 mkValidator :: () -> () -> ScriptContext -> Bool
-mkValidator _ _ _ = (checkForCorrectAmount valueSpent)
+mkValidator _ _ ctx@ScriptContext{scriptContextTxInfo=txInfo} = 
+    let 
+        info = scriptContextTxInfo
+    in checkForCorrectAmount (info ctx)
 
+        
+     
+   
 data PurchaseVar
 instance Scripts.ValidatorTypes PurchaseVar where
     type instance RedeemerType PurchaseVar = ()
@@ -42,8 +50,8 @@ storeContract = Scripts.mkTypedValidator @PurchaseVar
 -- cheack  the amount of ADA sent by the wallet to makes sure its acceptable
 -- 30000000 is equal to 30 ADA
 {-# INLINABLE checkForCorrectAmount #-}
-checkForCorrectAmount :: Value -> Bool
-checkForCorrectAmount senderValue = (senderValue > (singleton adaSymbol adaToken 30000000))
+checkForCorrectAmount :: TxInfo -> Bool
+checkForCorrectAmount info = ((valueSpent info) > (singleton adaSymbol adaToken 30000000))
 
 -- Minting policy gained from https://playground.plutus.iohkdev.io/doc/plutus/tutorials/basic-minting-policies.html
 -- Allows for the minting of 1 at a time
