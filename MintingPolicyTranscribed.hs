@@ -9,17 +9,8 @@ import Playground.Contract
 import Plutus.Contract
 import PlutusTx (CompiledCode)
 import PlutusTx qualified
+import Plutus.Contract.Test
 import PlutusTx.Prelude hiding (Applicative (..))
-
-
-data ContractInfo = ContractInfo
-    { recvPkh :: PaymentPubKeyHash
-    } 
-    deriving (Generic, ToJSON, FromJSON, ToSchema)
-
-contractInfo = ContractInfo
-    { recvPkh = "3f7846896a48c59359746ff096d63606ceb82e65900d20a9fd2b8a93"
-    }
 
 -- makes sure that all outputs are being sent to the above address
 {-# INLINABLE mkValidator #-}
@@ -49,7 +40,7 @@ storeContract = Scripts.mkTypedValidator @PurchaseVar
 -- 30000000 is equal to 30 ADA
 {-# INLINABLE checkForCorrectAmount #-}
 checkForCorrectAmount :: TxInfo -> Bool
-checkForCorrectAmount info = ((valueSpent info) > (singleton adaSymbol adaToken 30000000))
+checkForCorrectAmount info = ((valueSpent info) == (singleton adaSymbol adaToken 30000000))
 
 -- Minting policy gained from https://playground.plutus.iohkdev.io/doc/plutus/tutorials/basic-minting-policies.html
 -- Allows for the minting of 1 at a time
@@ -77,20 +68,26 @@ nameOfToken = TokenName "car1"
 
 type Schema =
         Endpoint "storeFront" PaymentPubKeyHash
+        .\/ Endpoint "mint" GuessParams
 
 payPubHash :: PaymentPubKeyHash
-payPubHash = "3f7846896a48c59359746ff096d63606ceb82e65900d20a9fd2b8a93"
+payPubHash = mockWalletPaymentPubKeyHash w1 
 
 storeFront :: AsContractError e => Promise () Schema e ()
 storeFront = endpoint @"storeFront" $ \(payPubHash) -> do
     unspentOutputs <-  utxosAt contractAddress
-    
     let 
         tx       = Constraints.mustPayToPubKey payPubHash (singleton adaSymbol adaToken 30000000) 
     void $ submitTxConstraintsSpending storeContract unspentOutputs tx
+
+mint :: AsContractError e => Promise () Schema e ()
+mint = endpoint @"mint" $ \() -> do
+    let 
+        tx       = Constraints.mustMintCurrency (mintingPolicyHash oneAtATimePolicy) nameOfToken 1 -- tx contraint i o goes here
+    void $ submitTxConstraintsSpending storeContract unspentOutputs tx
         
 contract :: AsContractError e => Contract () Schema e ()
-contract = storeFront
+contract = selectList [storeFront, mint]
 
 endpoints :: AsContractError e => Contract () Schema e ()
 endpoints = contract
