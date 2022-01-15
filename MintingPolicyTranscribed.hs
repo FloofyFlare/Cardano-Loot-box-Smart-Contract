@@ -96,7 +96,7 @@ start StartParams{..} = do
         tx = Constraints.mustPayToTheScript d v
     ledgerTx <- submitTxConstraints typedAuctionValidator tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
-    logInfo @P.String $ printf "started auction %s for token %s" (P.show a) (P.show v)
+    logInfo @P.String $ printf "started storeFront %s for token %s" (P.show a) (P.show v)
 
 -- Minting policy gained from https://playground.plutus.iohkdev.io/doc/plutus/tutorials/basic-minting-policies.html
 -- Allows for the minting of 1 at a time
@@ -116,19 +116,10 @@ oneAtATimePolicy _ ctx =
 -- just as for validator scripts. We also provide a 'wrapMintingPolicy' function
 -- to handle the boilerplate.
 
-curSymbol :: CurrencySymbol
-curSymbol = scriptCurrencySymbol oneAtATimeCompiled
-
-
 oneAtATimeCompiled :: Scripts.MintingPolicy
 oneAtATimeCompiled = mkMintingPolicyScript $
     $$(PlutusTx.compile [|| Scripts.wrapMintingPolicy oneAtATimePolicy ||])
 
-nameOfToken :: TokenName
-nameOfToken = TokenName "car1"
-
-payPubHash :: PaymentPubKeyHash
-payPubHash = mockWalletPaymentPubKeyHash w1 
 
 -- creates a store front that a user can access using its specified store Currency symbol
 storeFront :: AsContractError e => Promise () Schema e ()
@@ -146,13 +137,38 @@ mint =  endpoint @"mint" $ \(ctx@ScriptContext{scriptContextTxInfo=txInfo}) -> d
         
         tx      = Constraints.mustMintValue (mintingPolicyHash oneAtATimeCompiled) (info ctx) nameOfToken 1 
     void $ submitTxConstraintsSpending oneAtATimeCompiled unspentOutputs tx
-        
-contract :: AsContractError e => Contract () Schema e ()
-contract = selectList [storeFront, mint]
 
-endpoints :: AsContractError e => Contract () Schema e ()
-endpoints = contract
+--allows the script to find the store front referenced by a consumer        
+findStore :: CurrencySymbol
+            -> TokenName
+            -> Contract w s Text (TxOutRef, ChainIndexTxOut, AuctionDatum)
+findStore cs tn = do
+    utxos <- utxosAt $ scriptHashAddress auctionHash
+    let xs = [ (oref, o)
+             | (oref, o) <- Map.toList utxos
+             , Value.valueOf (_ciTxOutValue o) cs tn == 1
+             ]
+    case xs of
+        [(oref, o)] -> case _ciTxOutDatum o of
+            Left _          -> throwError "datum missing"
+            Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+                Nothing -> throwError "datum has wrong type"
+                Just d@AuctionDatum{..}
+                    | aCurrency adAuction == cs && aToken adAuction == tn -> return (oref, o, d)
+                    | otherwise                                           -> throwError "auction token missmatch"
+        _           -> throwError "auction utxo not found"
 
-mkSchemaDefinitions ''Schema
+endpoints :: Contract () AuctionSchema Text ()
+endpoints = awaitPromise (start' `select` bid' `select` close') >> endpoints
+  where
+    start' = endpoint @"start" start
+    bid'   = endpoint @"bid"   bid
+    close' = endpoint @"close" close
 
-$(mkKnownCurrencies [])
+mkSchemaDefinitions ''AuctionSchema
+
+--lets see if i can make it so it will display the tokenName correctly depending on the purchase
+myToken :: KnownCurrency
+myToken = KnownCurrency (ValidatorHash "f") "Token" (TokenName "T" :| [])
+
+mkKnownCurrencies ['myToken]
