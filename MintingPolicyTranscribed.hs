@@ -1,4 +1,3 @@
-import Control.Monad (void)
 import Ledger (Address, ownCurrencySymbol, PaymentPubKeyHash, mintingPolicyHash, TxOutRef, Redeemer)
 import Data.Aeson (ToJSON, FromJSON)
 import Ledger.Constraints qualified as Constraints
@@ -6,27 +5,39 @@ import Ledger.Typed.Scripts qualified as Scripts
 import Ledger.Value (Value, CurrencySymbol, singleton, valueOf)
 import Plutus.V2.Ledger.Api (adaSymbol, adaToken, txOutValue, PubKeyHash, TxOut, txInfoOutputs, singleton, mkMintingPolicyScript)
 import Ledger.Contexts (valueSpent, ScriptContext(..), TxInfo(..), scriptCurrencySymbol)
-import Playground.Contract
 import Plutus.Contract
-import PlutusTx (CompiledCode)
 import PlutusTx qualified
 import Plutus.Contract.Test
 import PlutusTx.Prelude hiding (Applicative (..))
+import Control.Monad        hiding (fmap)
+import Data.List.NonEmpty   (NonEmpty (..))
+import Data.Map             as Map
+import Data.Text            (pack, Text)
+import GHC.Generics         (Generic)
+import Ledger.Value         as Value
+import Ledger.Ada           as Ada
+import Playground.Contract  (IO, ensureKnownCurrencies, printSchemas, stage, printJson)
+import Playground.TH        (mkKnownCurrencies, mkSchemaDefinitions)
+import Playground.Types     (KnownCurrency (..))
+import qualified PlutusTx
+import PlutusTx.Prelude     hiding (unless)
 import qualified Prelude              as P
+import Schema               (ToSchema)
+import Text.Printf          (printf)
 
 data Seller = Seller 
-    { aSeller   :: !PaymentPubKeyHash
-    , aPrice    :: !Integer
-    , aCurrency :: !CurrencySymbol
-    , aToken    :: !TokenName
+    { sSeller   :: !PaymentPubKeyHash
+    , sPrice    :: !Integer
+    , sCurrency :: !CurrencySymbol
+    , sToken    :: !TokenName
     } deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
 
 instance Eq Seller where
     {-# INLINABLE (==) #-}
-    a == b = (aSeller   a == aSeller   b) &&
-             (aPrice    a == aPrice    b) &&
-             (aCurrency a == aCurrency b) &&
-             (aToken    a == aToken    b)
+    a == b = (sSeller   a == sSeller   b) &&
+             (sPrice    a == sPrice    b) &&
+             (sCurrency a == sCurrency b) &&
+             (sToken    a == sToken    b)
 
 PlutusTx.unstableMakeIsData ''Seller
 PlutusTx.makeLift ''Seller
@@ -61,36 +72,40 @@ storeContract = Scripts.mkTypedValidator @PurchaseVar
 checkForCorrectAmount :: TxInfo -> Bool
 checkForCorrectAmount info = ((valueSpent info) == price)
 
+data StoreFrontDatum = StoreFrontDatum
+    { sdStore    :: !Seller
+    } deriving P.Show
 
-data SellerParams = StartParams
+PlutusTx.unstableMakeIsData ''StoreFrontDatum
+PlutusTx.makeLift ''StoreFrontDatum
+
+data SellerParams = SellerParams
     { apPrice    :: !Integer
     , apCurrency :: !CurrencySymbol
     , apToken    :: !TokenName
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
-data MintParams = BidParams
+data MintParams = MintParams
     { mpCurrency :: !CurrencySymbol
     , mpToken    :: !TokenName
-    , mpBid      :: !Integer
+    , mpPrice      :: !Integer
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
-type Schema =
-        Endpoint "storeFront" SellerParams
-        .\/ Endpoint "mint" MintParams
+type StoreStoreSchema =
+        Endpoint "storeFront" MintParams
+    .\/ Endpoint "start" SellerParams
 
-start :: AsContractError e => StartParams -> Contract w s e ()
-start StartParams{..} = do
+start :: AsContractError e => SellerParams -> Contract w s e ()
+start SellerParams{..} = do
     pkh <- ownPaymentPubKeyHash
-    let a = Auction
-                { aSeller   = pkh
-                , aDeadline = spDeadline
-                , aMinBid   = spMinBid
-                , aCurrency = spCurrency
-                , aToken    = spToken
+    let a = Seller
+                { sSeller   = pkh
+                , sPrice    = apPrice
+                , sCurrency = apCurrency
+                , sToken    = apToken
                 }
-        d = AuctionDatum
-                { adAuction    = a
-                , adHighestBid = Nothing
+        d = StoreFrontDatum
+                { sdStore    = a
                 }
         v = Value.singleton spCurrency spToken 1 <> Ada.lovelaceValueOf minLovelace
         tx = Constraints.mustPayToTheScript d v
@@ -98,7 +113,6 @@ start StartParams{..} = do
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
     logInfo @P.String $ printf "started storeFront %s for token %s" (P.show a) (P.show v)
 
--- Minting policy gained from https://playground.plutus.iohkdev.io/doc/plutus/tutorials/basic-minting-policies.html
 -- Allows for the minting of 1 at a time
 {-# INLINABLE oneAtATimePolicy #-}
 oneAtATimePolicy :: () -> ScriptContext -> Bool
@@ -141,7 +155,7 @@ mint =  endpoint @"mint" $ \(ctx@ScriptContext{scriptContextTxInfo=txInfo}) -> d
 --allows the script to find the store front referenced by a consumer        
 findStore :: CurrencySymbol
             -> TokenName
-            -> Contract w s Text (TxOutRef, ChainIndexTxOut, AuctionDatum)
+            -> Contract w s Text (TxOutRef, ChainIndexTxOut, StoreFrontDatum)
 findStore cs tn = do
     utxos <- utxosAt $ scriptHashAddress auctionHash
     let xs = [ (oref, o)
@@ -153,19 +167,18 @@ findStore cs tn = do
             Left _          -> throwError "datum missing"
             Right (Datum e) -> case PlutusTx.fromBuiltinData e of
                 Nothing -> throwError "datum has wrong type"
-                Just d@AuctionDatum{..}
-                    | aCurrency adAuction == cs && aToken adAuction == tn -> return (oref, o, d)
+                Just d@StoreFrontDatum{..}
+                    | aCurrency sdStore == cs && aToken sdStore == tn -> return (oref, o, d)
                     | otherwise                                           -> throwError "auction token missmatch"
         _           -> throwError "auction utxo not found"
 
-endpoints :: Contract () AuctionSchema Text ()
-endpoints = awaitPromise (start' `select` bid' `select` close') >> endpoints
+endpoints :: Contract () StoreSchema Text ()
+endpoints = awaitPromise (start' `select` storeFront' `select`) >> endpoints
   where
     start' = endpoint @"start" start
-    bid'   = endpoint @"bid"   bid
-    close' = endpoint @"close" close
+    storeFront'   = endpoint @"storeFront" storeFront
 
-mkSchemaDefinitions ''AuctionSchema
+mkStoreSchemaDefinitions ''StoreSchema
 
 --lets see if i can make it so it will display the tokenName correctly depending on the purchase
 myToken :: KnownCurrency
