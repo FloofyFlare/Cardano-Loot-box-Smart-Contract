@@ -1,158 +1,60 @@
-import Control.Monad (void)
-import Ledger (Address, ownCurrencySymbol, PaymentPubKeyHash, mintingPolicyHash, TxOutRef, Redeemer)
-import Data.Aeson (ToJSON, FromJSON)
-import Ledger.Constraints qualified as Constraints
-import Ledger.Typed.Scripts qualified as Scripts
-import Ledger.Value (Value, CurrencySymbol, singleton, valueOf)
-import Plutus.V2.Ledger.Api (adaSymbol, adaToken, txOutValue, PubKeyHash, TxOut, txInfoOutputs, singleton, mkMintingPolicyScript)
-import Ledger.Contexts (valueSpent, ScriptContext(..), TxInfo(..), scriptCurrencySymbol)
-import Playground.Contract
-import Plutus.Contract
-import PlutusTx (CompiledCode)
-import PlutusTx qualified
-import Plutus.Contract.Test
-import PlutusTx.Prelude hiding (Applicative (..))
-import qualified Prelude              as P
+import           Control.Monad          hiding (fmap)
+import           Data.Aeson             (ToJSON, FromJSON)
+import           Data.Text              (Text)
+import           Data.Void              (Void)
+import           GHC.Generics           (Generic)
+import           Plutus.Contract        as Contract
+import           Plutus.Trace.Emulator  as Emulator
+import qualified PlutusTx
+import           PlutusTx.Prelude       hiding (Semigroup(..), unless)
+import           Ledger                 hiding (mint, singleton)
+import           Ledger.Constraints     as Constraints
+import qualified Ledger.Typed.Scripts   as Scripts
+import           Ledger.Value           as Value
+import           Playground.Contract    (printJson, printSchemas, ensureKnownCurrencies, stage, ToSchema)
+import           Playground.TH          (mkKnownCurrencies, mkSchemaDefinitions)
+import           Playground.Types       (KnownCurrency (..))
+import           Prelude                (IO, Show (..), String)
+import           Text.Printf            (printf)
+import           Wallet.Emulator.Wallet
+import Prelude qualified as Haskell
 
-data Seller = Seller 
-    { aSeller   :: !PaymentPubKeyHash
-    , aPrice    :: !Integer
-    , aCurrency :: !CurrencySymbol
-    , aToken    :: !TokenName
-    } deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
+{-# INLINABLE mkPolicy #-}
+mkPolicy :: PubKeyHash -> () -> ScriptContext -> Bool
+mkPolicy pkh () ctx = txSignedBy (scriptContextTxInfo ctx) pkh
 
-instance Eq Seller where
-    {-# INLINABLE (==) #-}
-    a == b = (aSeller   a == aSeller   b) &&
-             (aPrice    a == aPrice    b) &&
-             (aCurrency a == aCurrency b) &&
-             (aToken    a == aToken    b)
+policy :: PubKeyHash -> Scripts.MintingPolicy
+policy pkh = mkMintingPolicyScript $
+    $$(PlutusTx.compile [|| Scripts.wrapMintingPolicy . mkPolicy||])
+    `PlutusTx.applyCode`
+    (PlutusTx.liftCode pkh)
 
-PlutusTx.unstableMakeIsData ''Seller
-PlutusTx.makeLift ''Seller
+curSymbol :: PubKeyHash -> CurrencySymbol
+curSymbol = scriptCurrencySymbol . policy
 
--- makes sure that all outputs are being sent to the above address
-{-# INLINABLE mkValidator #-}
-mkValidator :: () -> () -> ScriptContext -> Bool
-mkValidator _ _ ctx@ScriptContext{scriptContextTxInfo=txInfo} = 
-    let 
-        info = scriptContextTxInfo
-    in checkForCorrectAmount (info ctx)
-
-data PurchaseVar
-instance Scripts.ValidatorTypes PurchaseVar where
-    type instance RedeemerType PurchaseVar = ()
-    type instance DatumType PurchaseVar = ()
-
---hash of the validator script (address of the contract)
-contractAddress :: Address
-contractAddress = Scripts.validatorAddress storeContract
-
--- | The script instance is the compiled validator (ready to go onto the chain)
-storeContract :: Scripts.TypedValidator PurchaseVar
-storeContract = Scripts.mkTypedValidator @PurchaseVar
-    $$(PlutusTx.compile [|| mkValidator ||])
-    $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator 
-
--- cheack  the amount of ADA sent by the wallet to makes sure its acceptable
--- 30000000 is equal to 30 ADA
-{-# INLINABLE checkForCorrectAmount #-}
-checkForCorrectAmount :: TxInfo -> Bool
-checkForCorrectAmount info = ((valueSpent info) == price)
-
-
-data SellerParams = StartParams
-    { apPrice    :: !Integer
-    , apCurrency :: !CurrencySymbol
-    , apToken    :: !TokenName
+data MintParams = MintParams
+    { mpTokenName :: !TokenName
+    , mpAmount    :: !Integer
+    , pkh         :: !PubKeyHash
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
-data MintParams = BidParams
-    { mpCurrency :: !CurrencySymbol
-    , mpToken    :: !TokenName
-    , mpBid      :: !Integer
-    } deriving (Generic, ToJSON, FromJSON, ToSchema)
+type SignedSchema = Endpoint "mint" MintParams
 
-type Schema =
-        Endpoint "storeFront" SellerParams
-        .\/ Endpoint "mint" MintParams
-
-start :: AsContractError e => StartParams -> Contract w s e ()
-start StartParams{..} = do
-    pkh <- ownPaymentPubKeyHash
-    let a = Auction
-                { aSeller   = pkh
-                , aDeadline = spDeadline
-                , aMinBid   = spMinBid
-                , aCurrency = spCurrency
-                , aToken    = spToken
-                }
-        d = AuctionDatum
-                { adAuction    = a
-                , adHighestBid = Nothing
-                }
-        v = Value.singleton spCurrency spToken 1 <> Ada.lovelaceValueOf minLovelace
-        tx = Constraints.mustPayToTheScript d v
-    ledgerTx <- submitTxConstraints typedAuctionValidator tx
+mint :: MintParams -> Contract w SignedSchema Text ()
+mint mp = do
+    let val     = Value.singleton (curSymbol (pkh mp)) (mpTokenName mp) (mpAmount mp)
+        lookups = Constraints.mintingPolicy $ policy (pkh mp)
+        tx      = Constraints.mustMintValue val
+    ledgerTx <- submitTxConstraintsWith @Void lookups tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
-    logInfo @P.String $ printf "started auction %s for token %s" (P.show a) (P.show v)
+    Contract.logInfo @String $ printf "forged %s" (show val)
 
--- Minting policy gained from https://playground.plutus.iohkdev.io/doc/plutus/tutorials/basic-minting-policies.html
--- Allows for the minting of 1 at a time
-{-# INLINABLE oneAtATimePolicy #-}
-oneAtATimePolicy :: () -> ScriptContext -> Bool
-oneAtATimePolicy _ ctx =
-    -- 'ownCurrencySymbol' lets us get our own hash (= currency symbol)
-    -- from the context
-    let ownSymbol = ownCurrencySymbol ctx
-        txinfo = scriptContextTxInfo ctx
-        minted = txInfoMint txinfo
-    -- Here we're looking at some specific token name, which we
-    -- will assume we've got from elsewher e for now.
-    in valueOf minted ownSymbol nameOfToken == 1
-
--- We can use 'compile' to turn a minting policy into a compiled Plutus Core program,
--- just as for validator scripts. We also provide a 'wrapMintingPolicy' function
--- to handle the boilerplate.
-
-curSymbol :: CurrencySymbol
-curSymbol = scriptCurrencySymbol oneAtATimeCompiled
+endpoints :: Contract () SignedSchema Text ()
+endpoints = awaitPromise mint' >> endpoints
+  where
+    mint' = endpoint @"mint" mint
 
 
-oneAtATimeCompiled :: Scripts.MintingPolicy
-oneAtATimeCompiled = mkMintingPolicyScript $
-    $$(PlutusTx.compile [|| Scripts.wrapMintingPolicy oneAtATimePolicy ||])
+mkSchemaDefinitions ''SignedSchema
 
-nameOfToken :: TokenName
-nameOfToken = TokenName "car1"
-
-payPubHash :: PaymentPubKeyHash
-payPubHash = mockWalletPaymentPubKeyHash w1 
-
--- creates a store front that a user can access using its specified store Currency symbol
-storeFront :: AsContractError e => Promise () Schema e ()
-storeFront = endpoint @"storeFront" $ \(payPubHash) -> do
-    unspentOutputs <-  utxosAt contractAddress
-    let 
-        tx       = Constraints.mustPayToPubKey payPubHash price 
-    void $ submitTxConstraintsSpending storeContract unspentOutputs tx
-
-mint :: AsContractError e => Promise () Schema e ()
-mint =  endpoint @"mint" $ \(ctx@ScriptContext{scriptContextTxInfo=txInfo}) -> do
-    unspentOutputs <-  utxosAt contractAddress
-    let val     =  singleton curSymbol nameOfToken
-        info    = scriptContextTxInfo
-        
-        tx      = Constraints.mustMintValue (mintingPolicyHash oneAtATimeCompiled) (info ctx) nameOfToken 1 
-    void $ submitTxConstraintsSpending oneAtATimeCompiled unspentOutputs tx
-        
-contract :: AsContractError e => Contract () Schema e ()
-contract = selectList [storeFront, mint]
-
-endpoints :: AsContractError e => Contract () Schema e ()
-endpoints = contract
-
-mkSchemaDefinitions ''Schema
-
-$(mkKnownCurrencies [])
+mkKnownCurrencies []
