@@ -17,7 +17,8 @@ import           Playground.Types       (KnownCurrency (..))
 import           Prelude                (IO, Show (..), String)
 import           Text.Printf            (printf)
 import           Wallet.Emulator.Wallet
-import Prelude qualified as Haskell
+import           PlutusTx.Prelude
+import           Wallet.Effects (ownPaymentPubKeyHash)
 
 {-# INLINABLE mkPolicy #-}
 mkPolicy :: PubKeyHash -> () -> ScriptContext -> Bool
@@ -35,15 +36,28 @@ curSymbol = scriptCurrencySymbol . policy
 data MintParams = MintParams
     { mpTokenName :: !TokenName
     , mpAmount    :: !Integer
-    , pkh         :: !PubKeyHash
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
+
+PlutusTx.makeLift ''MintParams
 
 type SignedSchema = Endpoint "mint" MintParams
 
+--there are two error signals so be careful to make sure they dont get triped
+ownPubKey :: PubKeyHash
+ownPubKey = case (toPubKeyHash $ ownAddress ownWallet) of
+    Nothing     ->  error ()
+    Just x      ->  x
+
+ownWallet :: WalletState
+ownWallet = case (emptyWalletState $ knownWallet 1) of 
+    Nothing     ->  error () 
+    Just x      ->  x
+
 mint :: MintParams -> Contract w SignedSchema Text ()
 mint mp = do
-    let val     = Value.singleton (curSymbol (pkh mp)) (mpTokenName mp) (mpAmount mp)
-        lookups = Constraints.mintingPolicy $ policy (pkh mp)
+    let pkh = ownPubKey
+        val     = Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)
+        lookups = Constraints.mintingPolicy $ policy (pkh)
         tx      = Constraints.mustMintValue val
     ledgerTx <- submitTxConstraintsWith @Void lookups tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
@@ -53,7 +67,6 @@ endpoints :: Contract () SignedSchema Text ()
 endpoints = awaitPromise mint' >> endpoints
   where
     mint' = endpoint @"mint" mint
-
 
 mkSchemaDefinitions ''SignedSchema
 
