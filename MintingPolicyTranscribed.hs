@@ -22,33 +22,6 @@ import           Wallet.Effects (ownPaymentPubKeyHash)
 import qualified PlutusTx.Builtins      as Builtins
 import           Plutus.V1.Ledger.Ada as Ada
 
-data ContractInfo = ContractInfo
-    { policySpaceBudz :: !CurrencySymbol
-    , policyBid :: !CurrencySymbol
-    , prefixSpaceBud :: !BuiltinByteString
-    , prefixSpaceBudBid :: !BuiltinByteString
-    , owner1 :: !(PubKeyHash, Integer, Integer)
-    , owner2 :: !(PubKeyHash, Integer)
-    , extraRecipient :: !Integer
-    , minPrice :: !Integer
-    , bidStep :: !Integer
-    } deriving (Generic, ToJSON, FromJSON)
-
-
-contractInfo = ContractInfo 
-    { policySpaceBudz = "d5e6bf0500378d4f0da4e8dde6becec7621cd8cbf5cbb9b87013d4cc"
-    , policyBid = "800df05a0cc6b6f0d28aaa1812135bd9eebfbf5e8e80fd47da9989eb"
-    , prefixSpaceBud = "SpaceBud"
-    , prefixSpaceBudBid = "SpaceBudBid"
-    , owner1 = ("826d9fafe1b3acf15bd250de69c04e3fc92c4493785939e069932e89", 416, 625) -- 2.4% 1.6%
-    , owner2 = ("88269f8b051a739300fe743a7b315026f4614ce1216a4bb45d7fd0f5", 2500) -- 0.4%
-    , extraRecipient = 2500 -- 0.4%
-    , minPrice = 70000000
-    , bidStep = 10000
-    }
-
-
-
 minADA :: Value
 minADA = Ada.lovelaceValueOf 2000000
 
@@ -59,18 +32,18 @@ price = Ada.lovelaceValueOf 5000000
 data LootBoxData
 instance Scripts.ValidatorTypes LootBoxData where
     type instance RedeemerType LootBoxData = ()
-    type instance DatumType LootBoxData = ()
+    type instance DatumType LootBoxData = Integer
 
---Checks the validatorHash to make sure the LootBox has tokens to host the transaction
+--holds 1 token utxos for payout
 {-# INLINABLE mkValidator #-}
-mkValidator :: () -> () -> ScriptContext -> Bool
+mkValidator :: Integer -> () -> ScriptContext -> Bool
 mkValidator _ _ ctx = True
 
 lootBox :: Scripts.TypedValidator LootBoxData
 lootBox = Scripts.mkTypedValidator @LootBoxData
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.wrapValidator @Integer
 
 valHash :: Ledger.ValidatorHash
 valHash = Scripts.validatorHash lootBox
@@ -104,6 +77,7 @@ data MintParams = MintParams
 
 PlutusTx.makeLift ''MintParams
 
+
 --there are two error signals triped when wallet 1 isent the owner
 ownPubKey :: PubKeyHash
 ownPubKey = case (toPubKeyHash $ ownAddress ownWallet) of
@@ -135,7 +109,7 @@ mint mp = do
 lock :: AsContractError e => MintParams -> Contract w s e ()
 lock mp =  do
     let pkh = ownPubKey
-        tx         = Constraints.mustPayToTheScript () $ (Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)) <> minADA
+        tx         = Constraints.mustPayToTheScript 1 $ (Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)) <> minADA
     void (submitTxConstraints lootBox tx)
 
 purchase :: AsContractError e => MintParams -> Contract w s e ()
@@ -144,7 +118,7 @@ purchase mp =  do
 
     let redeemer = ()
         pkh = ownPubKey
-        tx       = Constraints.mustPayToPubKey (owner1 contractInfo) price <> collectFromScript utxos redeemer
+        tx       = Constraints.mustPayToTheScript () price <> collectFromScript utxos redeemer
 
     void (submitTxConstraintsSpending lootBox utxos tx)
 
