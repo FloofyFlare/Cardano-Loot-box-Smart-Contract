@@ -18,15 +18,33 @@ import           Prelude                (IO, Show (..), String)
 import           Text.Printf            (printf)
 import           Wallet.Emulator.Wallet
 import           PlutusTx.Prelude
-import           Wallet.Effects (ownPaymentPubKeyHash)
+import           Wallet.Effects         as Effects
 import qualified PlutusTx.Builtins      as Builtins
 import           Plutus.V1.Ledger.Ada as Ada
+import           Ledger.Tx              (scriptTxOut, ChainIndexTxOut)
+import           Data.Map             as Map
+import           Plutus.ChainIndex.Tx 
+import           Ledger.Blockchain 
+
 
 minADA :: Value
 minADA = Ada.lovelaceValueOf 2000000
 
 price :: Value 
 price = Ada.lovelaceValueOf 5000000
+
+data ContractInfo = ContractInfo
+    { policyID :: !CurrencySymbol
+    , walletOwner :: !PubKeyHash
+    , nameOfToken :: !TokenName
+    } deriving (Generic, ToJSON, FromJSON)
+
+
+contractInfo = ContractInfo 
+    { policyID = "8b0dbdd6504ff8f129400ab3b21f12a52ffb09f0b3cff594cb5bb868"
+    , walletOwner = "a2c20c77887ace1cd986193e4e75babd8993cfd56995cd5cfce609c2"
+    , nameOfToken = "reward"
+    }
 
 --purchase portion of the contract 
 data LootBoxData
@@ -55,6 +73,7 @@ valAddress :: Address
 valAddress = Scripts.validatorAddress lootBox
 
 
+
 --Start of minting portion of the smart contract
 
 {-# INLINABLE mkPolicy #-}
@@ -67,6 +86,7 @@ policy pkh = mkMintingPolicyScript $
     `PlutusTx.applyCode`
     (PlutusTx.liftCode pkh)
 
+--dont need
 curSymbol :: PubKeyHash -> CurrencySymbol
 curSymbol = scriptCurrencySymbol . policy
 
@@ -77,6 +97,12 @@ data MintParams = MintParams
 
 PlutusTx.makeLift ''MintParams
 
+data PurchaseParams = PurchaseParams
+    { pTokenName :: !TokenName
+    , pPayment   :: !PaymentPubKeyHash
+    } deriving (Generic, ToJSON, FromJSON, ToSchema)
+
+PlutusTx.makeLift ''PurchaseParams
 
 --there are two error signals triped when wallet 1 isent the owner
 ownPubKey :: PubKeyHash
@@ -94,11 +120,11 @@ ownWallet = case (emptyWalletState $ knownWallet 1) of
 type SignedSchema = 
     Endpoint "mint" MintParams
      .\/ Endpoint "lock" MintParams
-     .\/ Endpoint "purchase" MintParams
+     .\/ Endpoint "purchase" PurchaseParams
 
 mint :: MintParams -> Contract w SignedSchema Text ()
 mint mp = do
-    let pkh = ownPubKey
+    let pkh = (walletOwner contractInfo)
         val     = Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)
         lookups = Constraints.mintingPolicy $ policy (pkh)
         tx      = Constraints.mustMintValue val
@@ -108,18 +134,21 @@ mint mp = do
 
 lock :: AsContractError e => MintParams -> Contract w s e ()
 lock mp =  do
-    let pkh = ownPubKey
-        tx         = Constraints.mustPayToTheScript () $ (Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)) <> minADA
+    let tx         = Constraints.mustPayToTheScript () $ (Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (mpAmount mp)) <> minADA
     void (submitTxConstraints lootBox tx)
 
-purchase :: AsContractError e => MintParams -> Contract w s e ()
-purchase mp =  do
+purchaseUtxo :: ChainIndexTxOut
+purchaseUtxo = case fromTxOut (scriptTxOut (Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (1)) validate (Datum $ PlutusTx.toBuiltinData ()) )  of
+    Nothing     ->  error ()
+    Just x      ->  x
+
+purchase ::  AsContractError e => PurchaseParams -> Contract w s e ()
+purchase p=  do
     utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
-
-    let redeemer = ()
+    let redeemer = () 
         pkh = ownPubKey
-        tx       = Constraints.mustPayToTheScript () price <> collectFromScript utxos redeemer
-
+        tx       = Constraints.mustPayToPubKey (paymentPubKeyHash $ ownPaymentPublicKey ownWallet) price <> collectFromScript utxos redeemer
+        
     void (submitTxConstraintsSpending lootBox utxos tx)
 
 endpoints :: Contract () SignedSchema Text ()
