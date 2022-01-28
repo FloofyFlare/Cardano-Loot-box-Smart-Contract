@@ -4,3 +4,4 @@ A loot box smart contract written in Haskell for the Cardano bockchain
 - Minting endpoint allows the minting of tokens for the loot box
 - lock locks value to the validation script 
 - purchase is a work in progress
+- Code commet 6aff97d596ac9d59460aab5c65627b1c8c0a1528 was replaced by 3f84ea4fe3924cb7ee614da2b22c64c02c1177e6 If you are refrencing Building better loot boxes with cardano
