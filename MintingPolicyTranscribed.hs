@@ -31,7 +31,7 @@ minADA :: Value
 minADA = Ada.lovelaceValueOf 2000000
 
 price :: Value 
-price = Ada.lovelaceValueOf 5000000
+price = Ada.lovelaceValueOf 10000000
 
 data ContractInfo = ContractInfo
     { policyID :: !CurrencySymbol
