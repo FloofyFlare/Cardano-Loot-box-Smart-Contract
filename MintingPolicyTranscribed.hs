@@ -1,204 +1,163 @@
-import Ledger 
-import Data.Aeson (ToJSON, FromJSON)
-import Ledger.Constraints qualified as Constraints
-import Ledger.Typed.Scripts qualified as Scripts
-import Ledger.Value (Value, CurrencySymbol, singleton, valueOf)
-import Plutus.V2.Ledger.Api (adaSymbol, adaToken, txOutValue, PubKeyHash, TxOut, txInfoOutputs, singleton, mkMintingPolicyScript)
-import Ledger.Contexts (valueSpent, ScriptContext(..), TxInfo(..), scriptCurrencySymbol)
-import Plutus.Contract
-import PlutusTx qualified
-import Plutus.Contract.Test
-import PlutusTx.Prelude hiding (Applicative (..))
-import Control.Monad        hiding (fmap)
-import Data.List.NonEmpty   (NonEmpty (..))
-import Data.Map             as Map
-import Data.Text            (pack, Text)
-import GHC.Generics         (Generic)
-import Ledger.Value         as Value
-import Ledger.Ada           as Ada
-import Playground.Contract  (IO, ensureKnownCurrencies, printSchemas, stage, printJson)
-import Playground.TH        (mkKnownCurrencies, mkSchemaDefinitions)
-import Playground.Types     (KnownCurrency (..))
+import           Control.Monad          hiding (fmap)
+import           Data.Aeson             (ToJSON, FromJSON)
+import           Data.Text              (Text)
+import           Data.Void              (Void)
+import           GHC.Generics           (Generic)
+import           Plutus.Contract        as Contract
+import           Plutus.Trace.Emulator  as Emulator
 import qualified PlutusTx
-import PlutusTx.Prelude     hiding (unless)
-import qualified Prelude              as P
-import Schema               (ToSchema)
-import Text.Printf          (printf)
-
---mininmum price of Script compilation
-minLovelace :: Integer
-minLovelace = 2000000
-
-nameOfToken :: TokenName
-nameOfToken = TokenName "car1"
-
---seller Parameters
-data Seller = Seller 
-    { sSeller   :: !PaymentPubKeyHash
-    , sPrice    :: !Integer
-    , sCurrency :: !CurrencySymbol
-    , sToken    :: !TokenName
-    } deriving (P.Show, Generic, ToJSON, FromJSON, ToSchema)
-
-instance Eq Seller where
-    {-# INLINABLE (==) #-}
-    a == b = (sSeller   a == sSeller   b) &&
-             (sPrice    a == sPrice    b) &&
-             (sCurrency a == sCurrency b) &&
-             (sToken    a == sToken    b)
-
-PlutusTx.unstableMakeIsData ''Seller
-PlutusTx.makeLift ''Seller
+import           PlutusTx.Prelude       hiding (Semigroup(..), unless)
+import           Ledger                 hiding (mint, singleton)
+import           Ledger.Constraints     as Constraints
+import qualified Ledger.Typed.Scripts   as Scripts
+import           Ledger.Value           as Value
+import           Playground.Contract    (printJson, printSchemas, ensureKnownCurrencies, stage, ToSchema)
+import           Playground.TH          (mkKnownCurrencies, mkSchemaDefinitions)
+import           Playground.Types       (KnownCurrency (..))
+import           Prelude                (IO, Show (..), String)
+import           Text.Printf            (printf)
+import           Wallet.Emulator.Wallet
+import           PlutusTx.Prelude
+import           Wallet.Effects         as Effects
+import qualified PlutusTx.Builtins      as Builtins
+import           Plutus.V1.Ledger.Ada as Ada
+import           Ledger.Tx              (scriptTxOut, ChainIndexTxOut)
+import           Data.Map             as Map
+import           Plutus.ChainIndex.Tx 
+import           Ledger.Blockchain 
 
 
+minADA :: Value
+minADA = Ada.lovelaceValueOf 2000000
+
+price :: Value 
+price = Ada.lovelaceValueOf 5000000
+
+data ContractInfo = ContractInfo
+    { policyID :: !CurrencySymbol
+    , walletOwner :: !PubKeyHash
+    , nameOfToken :: !TokenName
+    } deriving (Generic, ToJSON, FromJSON)
+
+
+contractInfo = ContractInfo 
+    { policyID = "8b0dbdd6504ff8f129400ab3b21f12a52ffb09f0b3cff594cb5bb868"
+    , walletOwner = "a2c20c77887ace1cd986193e4e75babd8993cfd56995cd5cfce609c2"
+    , nameOfToken = "reward"
+    }
+
+--purchase portion of the contract 
+data LootBoxData
+instance Scripts.ValidatorTypes LootBoxData where
+    type instance RedeemerType LootBoxData = ()
+    type instance DatumType LootBoxData = ()
+
+--Checks the validatorHash to make sure the LootBox has tokens to host the transaction
 {-# INLINABLE mkValidator #-}
-mkValidator :: StoreFrontDatum -> () -> ScriptContext -> Bool
-mkValidator sd _ ctx = True
-    
-storeHash :: Ledger.ValidatorHash
-storeHash = Scripts.validatorHash storeContract
+mkValidator :: () -> () -> ScriptContext -> Bool
+mkValidator _ _ ctx = True
 
-storeValidator :: Validator
-storeValidator = Scripts.validatorScript storeContract
-
-data PurchaseVar
-instance Scripts.ValidatorTypes PurchaseVar where
-    type instance RedeemerType PurchaseVar = ()
-    type instance DatumType PurchaseVar = StoreFrontDatum
-
---hash of the validator script (address of the contract)
-contractAddress :: Address
-contractAddress = Scripts.validatorAddress storeContract
-
--- | The script instance is the compiled validator (ready to go onto the chain)
-storeContract :: Scripts.TypedValidator PurchaseVar
-storeContract = Scripts.mkTypedValidator @PurchaseVar
+lootBox :: Scripts.TypedValidator LootBoxData
+lootBox = Scripts.mkTypedValidator @LootBoxData
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator @StoreFrontDatum @_
+        wrap = Scripts.wrapValidator
 
--- cheack  the amount of ADA sent by the wallet to makes sure its acceptable
--- 30000000 is equal to 30 ADA
-{-# INLINABLE checkForCorrectAmount #-}
-checkForCorrectAmount :: TxInfo -> Value -> Bool
-checkForCorrectAmount info price = ((valueSpent info) == price)
+valHash :: Ledger.ValidatorHash
+valHash = Scripts.validatorHash lootBox
 
-data StoreFrontDatum = StoreFrontDatum
-    { sdStore    :: !Seller
-    } deriving P.Show
+validate :: Validator
+validate = Scripts.validatorScript lootBox
 
-PlutusTx.unstableMakeIsData ''StoreFrontDatum
-PlutusTx.makeLift ''StoreFrontDatum
+valAddress :: Address
+valAddress = Scripts.validatorAddress lootBox
 
-data SellerParams = SellerParams
-    { apPrice    :: !Integer
-    , apCurrency :: !CurrencySymbol
-    , apToken    :: !TokenName
-    } deriving (Generic, ToJSON, FromJSON, ToSchema)
+
+
+--Start of minting portion of the smart contract
+
+{-# INLINABLE mkPolicy #-}
+mkPolicy :: PubKeyHash -> () -> ScriptContext -> Bool
+mkPolicy pkh () ctx = txSignedBy (scriptContextTxInfo ctx) pkh
+
+policy :: PubKeyHash -> Scripts.MintingPolicy
+policy pkh = mkMintingPolicyScript $
+    $$(PlutusTx.compile [|| Scripts.wrapMintingPolicy . mkPolicy||])
+    `PlutusTx.applyCode`
+    (PlutusTx.liftCode pkh)
+
+--dont need
+curSymbol :: PubKeyHash -> CurrencySymbol
+curSymbol = scriptCurrencySymbol . policy
 
 data MintParams = MintParams
-    { mpCurrency :: !CurrencySymbol
-    , mpToken    :: !TokenName
-    , mpPrice      :: !Integer
+    { mpTokenName :: !TokenName
+    , mpAmount    :: !Integer
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
-type StoreSchema =
-        Endpoint "storeFront" MintParams
-    .\/ Endpoint "start" SellerParams
+PlutusTx.makeLift ''MintParams
 
-start :: AsContractError e => SellerParams -> Contract w s e ()
-start SellerParams{..} = do
-    pkh <- ownPaymentPubKeyHash
-    let a = Seller
-                { sSeller   = pkh
-                , sPrice    = apPrice
-                , sCurrency = apCurrency
-                , sToken    = apToken
-                }
-        d = StoreFrontDatum
-                { sdStore    = a
-                }
-        v = Ada.lovelaceValueOf minLovelace
-        tx = Constraints.mustPayToTheScript d v
-    ledgerTx <- submitTxConstraints storeContract tx
+data PurchaseParams = PurchaseParams
+    { pTokenName :: !TokenName
+    , pPayment   :: !PaymentPubKeyHash
+    } deriving (Generic, ToJSON, FromJSON, ToSchema)
+
+PlutusTx.makeLift ''PurchaseParams
+
+--there are two error signals triped when wallet 1 isent the owner
+ownPubKey :: PubKeyHash
+ownPubKey = case (toPubKeyHash $ ownAddress ownWallet) of
+    Nothing     ->  error ()
+    Just x      ->  x
+
+ownWallet :: WalletState
+ownWallet = case (emptyWalletState $ knownWallet 1) of 
+    Nothing     ->  error () 
+    Just x      ->  x
+
+
+--Start of endpoints
+type SignedSchema = 
+    Endpoint "mint" MintParams
+     .\/ Endpoint "lock" MintParams
+     .\/ Endpoint "purchase" ()
+
+mint :: MintParams -> Contract w SignedSchema Text ()
+mint mp = do
+    let pkh = (walletOwner contractInfo)
+        val     = Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)
+        lookups = Constraints.mintingPolicy $ policy (pkh)
+        tx      = Constraints.mustMintValue val
+    ledgerTx <- submitTxConstraintsWith @Void lookups tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
-    logInfo @P.String $ printf "started storeFront %s for token %s" (P.show a) (P.show v)
+    Contract.logInfo @String $ printf "forged %s" (show val)
 
+lock :: AsContractError e => MintParams -> Contract w s e ()
+lock mp =  do
+    let tx         = Constraints.mustPayToTheScript () $ (Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (mpAmount mp)) <> minADA
+    void (submitTxConstraints lootBox tx)
 
--- creates a store front that a user can access using its specified store Currency symbol
-storeFront :: forall w s. MintParams -> Contract w s Text ()
-storeFront MintParams{..} = do
-    (oref, o, d@StoreFrontDatum{..}) <- findStore mpCurrency mpToken
-    logInfo @P.String $ printf "found auction utxo with datum %s" (P.show d)
+purchaseUtxo :: ChainIndexTxOut
+purchaseUtxo = case fromTxOut (scriptTxOut (Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (1)) validate (Datum $ PlutusTx.toBuiltinData ()) )  of
+    Nothing     ->  error ()
+    Just x      ->  x
 
-    let r      = Redeemer $ PlutusTx.toBuiltinData ()
-        seller = sSeller sdStore
-        lookups = Constraints.typedValidatorLookups storeContract P.<>
-                  Constraints.otherScript storeValidator                P.<>
-                  Constraints.unspentOutputs (Map.singleton oref o)
+purchase ::  AsContractError e => () -> Contract w s e ()
+purchase _ =  do
+    utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
+    let redeemer = () 
+        pkh = ownPubKey
+        tx       = Constraints.mustPayToPubKey (paymentPubKeyHash $ ownPaymentPublicKey ownWallet) price <> collectFromScript utxos redeemer
+        
+    void (submitTxConstraintsSpending lootBox utxos tx)
 
-        tx    = Constraints.mustMintCurrency mintingHash mpToken 1 <> 
-                Constraints.mustPayToPubKey seller (Ada.lovelaceValueOf mpPrice) <>
-                Constraints.mustSpendScriptOutput oref r
-    ledgerTx <- submitTxConstraintsWith lookups tx
-    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
-    logInfo @P.String $ printf "closed sale %s for token (%s, %s)"
-        (P.show sdStore)
-        (P.show mpCurrency)
-        (P.show mpToken)
-
--- you could use the mintingParams as the redeemer turst me :)
--- Allows for the minting of 1 at a time
-{-# INLINABLE oneAtATimePolicy #-}
-oneAtATimePolicy :: () -> ScriptContext -> Bool
-oneAtATimePolicy _ ctx =
-    -- 'ownCurrencySymbol' lets us get our own hash (= currency symbol)
-    -- from the context
-    let ownSymbol = ownCurrencySymbol ctx
-        txinfo = scriptContextTxInfo ctx
-        minted = txInfoMint txinfo
-    -- Here we're looking at some specific token name, which we
-    -- will assume we've got from elsewher e for now.
-    in valueOf minted ownSymbol nameOfToken == 1
-
-    
--- We can use 'compile' to turn a minting policy into a compiled Plutus Core program,
--- just as for validator scripts. We also provide a 'wrapMintingPolicy' function
--- to handle the boilerplate.
-
-oneAtATimeCompiled :: Scripts.MintingPolicy
-oneAtATimeCompiled = mkMintingPolicyScript $
-    $$(PlutusTx.compile [|| Scripts.wrapMintingPolicy oneAtATimePolicy ||])
-
-mintingHash :: MintingPolicyHash 
-mintingHash = mintingPolicyHash oneAtATimeCompiled
-
---allows the script to find the store front referenced by a consumer        
-findStore :: CurrencySymbol
-            -> TokenName
-            -> Contract w s Text (TxOutRef, ChainIndexTxOut, StoreFrontDatum)
-findStore cs tn = do
-    utxos <- utxosAt $ scriptHashAddress storeHash
-    let xs = [ (oref, o)
-             | (oref, o) <- Map.toList utxos
-             , Value.valueOf (_ciTxOutValue o) cs tn == 1
-             ]
-    case xs of
-        [(oref, o)] -> case _ciTxOutDatum o of
-            Left _          -> throwError "datum missing"
-            Right (Datum e) -> case PlutusTx.fromBuiltinData e of
-                Nothing -> throwError "datum has wrong type"
-                Just d@StoreFrontDatum{..}
-                    | sCurrency sdStore == cs && sToken sdStore == tn -> return (oref, o, d)
-                    | otherwise                                           -> throwError "store token missmatch"
-        _           -> throwError "store utxo not found"
-
-endpoints :: Contract () StoreSchema Text ()
-endpoints = awaitPromise (start' `select` storeFront' ) >> endpoints
+endpoints :: Contract () SignedSchema Text ()
+endpoints = awaitPromise (mint' `select` lock' `select` purchase') >> endpoints
   where
-    start'        = endpoint @"start" start
-    storeFront'   = endpoint @"storeFront" storeFront
+    mint' = endpoint @"mint" mint
+    lock' = endpoint @"lock" lock
+    purchase' = endpoint @"purchase" purchase
 
-mkSchemaDefinitions ''StoreSchema
+mkSchemaDefinitions ''SignedSchema
 
 mkKnownCurrencies []
