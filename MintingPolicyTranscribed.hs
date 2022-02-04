@@ -105,12 +105,6 @@ data MintParams = MintParams
 
 PlutusTx.makeLift ''MintParams
 
-data PurchaseParams = PurchaseParams
-    { pTokenName :: !TokenName
-    , pPayment   :: !PaymentPubKeyHash
-    } deriving (Generic, ToJSON, FromJSON, ToSchema)
-
-PlutusTx.makeLift ''PurchaseParams
 
 --Start of endpoints
 type SignedSchema = 
