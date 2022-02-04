@@ -3,6 +3,7 @@ import           Data.Aeson             (ToJSON, FromJSON)
 import           Data.Text              (Text)
 import           Data.Void              (Void)
 import           GHC.Generics           (Generic)
+import           Plutus.Contract        
 import           Plutus.Contract        as Contract
 import           Plutus.Trace.Emulator  as Emulator
 import qualified PlutusTx
@@ -25,13 +26,19 @@ import           Ledger.Tx              (scriptTxOut, ChainIndexTxOut)
 import           Data.Map             as Map
 import           Plutus.ChainIndex.Tx 
 import           Ledger.Blockchain 
+import Playground.Contract
+import           Prelude              ((/), Float, toInteger, floor)
+import           Cardano.Api hiding (Value, TxOut,Address)
+import           Cardano.Api.Shelley hiding (Value, TxOut, Address)
+import           Codec.Serialise hiding (encode)
+import           Ledger.Address         as Add
 
 
 minADA :: Value
 minADA = Ada.lovelaceValueOf 2000000
 
 price :: Value 
-price = Ada.lovelaceValueOf 5000000
+price = Ada.lovelaceValueOf 10000000
 
 data ContractInfo = ContractInfo
     { policyID :: !CurrencySymbol
@@ -53,6 +60,7 @@ instance Scripts.ValidatorTypes LootBoxData where
     type instance DatumType LootBoxData = ()
 
 --Checks the validatorHash to make sure the LootBox has tokens to host the transaction
+--If never changed by the end of the project use the builtins script validator
 {-# INLINABLE mkValidator #-}
 mkValidator :: () -> () -> ScriptContext -> Bool
 mkValidator _ _ ctx = True
@@ -104,50 +112,37 @@ data PurchaseParams = PurchaseParams
 
 PlutusTx.makeLift ''PurchaseParams
 
---there are two error signals triped when wallet 1 isent the owner
-ownPubKey :: PubKeyHash
-ownPubKey = case (toPubKeyHash $ ownAddress ownWallet) of
-    Nothing     ->  error ()
-    Just x      ->  x
-
-ownWallet :: WalletState
-ownWallet = case (emptyWalletState $ knownWallet 1) of 
-    Nothing     ->  error () 
-    Just x      ->  x
-
-
 --Start of endpoints
 type SignedSchema = 
     Endpoint "mint" MintParams
      .\/ Endpoint "lock" MintParams
-     .\/ Endpoint "purchase" PurchaseParams
+     .\/ Endpoint "purchase" ()
 
-mint :: MintParams -> Contract w SignedSchema Text ()
+mint :: AsContractError e => MintParams -> Contract w s e ()
 mint mp = do
-    let pkh = (walletOwner contractInfo)
-        val     = Value.singleton (curSymbol (pkh)) (mpTokenName mp) (mpAmount mp)
+    ppkh <- Contract.ownPaymentPubKeyHash
+    let pkh     = unPaymentPubKeyHash ppkh
+        val     = Value.singleton (curSymbol pkh) (mpTokenName mp) (mpAmount mp)
         lookups = Constraints.mintingPolicy $ policy (pkh)
         tx      = Constraints.mustMintValue val
     ledgerTx <- submitTxConstraintsWith @Void lookups tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
-    Contract.logInfo @String $ printf "forged %s" (show val)
+    logInfo @String $ printf "forged %s" (show val)
 
 lock :: AsContractError e => MintParams -> Contract w s e ()
 lock mp =  do
+-- make a recusive function that allows for the creation of a 1000 utxos of diffrent datums from a wallet (cheap if implemented correctly) 
+        
     let tx         = Constraints.mustPayToTheScript () $ (Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (mpAmount mp)) <> minADA
     void (submitTxConstraints lootBox tx)
 
-purchaseUtxo :: ChainIndexTxOut
-purchaseUtxo = case fromTxOut (scriptTxOut (Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (1)) validate (Datum $ PlutusTx.toBuiltinData ()) )  of
-    Nothing     ->  error ()
-    Just x      ->  x
-
-purchase ::  AsContractError e => PurchaseParams -> Contract w s e ()
-purchase p=  do
+purchase :: () -> Contract w SignedSchema Text ()
+purchase _ =  do
     utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
+
     let redeemer = () 
-        pkh = ownPubKey
-        tx       = Constraints.mustPayToPubKey (paymentPubKeyHash $ ownPaymentPublicKey ownWallet) price <> collectFromScript utxos redeemer
+        ppkh     = walletOwner contractInfo
+        tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> collectFromScript utxos redeemer
         
     void (submitTxConstraintsSpending lootBox utxos tx)
 
