@@ -71,6 +71,11 @@ mkValidator i _ ctx = i == (datumOfTx $ TxOutTx TxOut)
         datumOfTx d = case txOutTxDatum d of
                     Nothing    -> traceError "no Datum Found"
                     Just a    -> a
+                    
+        ownTxIn :: TxInInfo -> TxOutTx
+        ownTxIn = findOwnInput ctx
+                    Nothing    -> traceError "no Output Found"
+                    Just a    -> a
         
         
 
