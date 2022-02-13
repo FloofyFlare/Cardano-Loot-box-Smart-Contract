@@ -57,35 +57,33 @@ contractInfo = ContractInfo
 --purchase portion of the contract 
 data LootBoxData
 instance Scripts.ValidatorTypes LootBoxData where
-    type instance RedeemerType LootBoxData = ()
+    type instance RedeemerType LootBoxData = Bool
     type instance DatumType LootBoxData = Integer
 
 --Checks the validatorHash to make sure the LootBox has tokens to host the transaction
 --If never changed by the end of the project use the builtins script validator
 {-# INLINABLE mkValidator #-}
-mkValidator :: Integer -> () -> ScriptContext -> Bool
-mkValidator i _ ctx = i == (datumOfTx $ TxOutTx TxOut)
-    -- right now it says interger == datum this wont compile
+mkValidator :: Integer -> Bool -> ScriptContext -> Bool
+mkValidator i x ctx = case x of 
+                    True -> ownTxInfo == i
+                    False -> True
     where
-        datumOfTx :: TxOutTx -> Datum
-        datumOfTx d = case txOutTxDatum d of
-                    Nothing    -> traceError "no Datum Found"
-                    Just a    -> a
-                    
-        ownTxIn :: TxInInfo -> TxOutTx
-        ownTxIn = findOwnInput ctx
-                    Nothing    -> traceError "no Output Found"
-                    Just a    -> a
-        
-        
+    -- TxInfo
+        ownTxInfop :: TxInfo
+        ownTxInfop = scriptContextTxInfo ctx
 
-
+    -- TxInInfo
+        ownTxInfo :: Integer
+        ownTxInfo = case findOwnInput ctx of
+            Nothing -> 1
+            Just a -> txOutRefIdx $ txInInfoOutRef a 
+        
 
 lootBox :: Scripts.TypedValidator LootBoxData
 lootBox = Scripts.mkTypedValidator @LootBoxData
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator @Integer
+        wrap = Scripts.wrapValidator @Integer @Bool
 
 valHash :: Ledger.ValidatorHash
 valHash = Scripts.validatorHash lootBox
@@ -154,7 +152,7 @@ purchase :: () -> Contract w SignedSchema Text ()
 purchase _ =  do
     utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
 
-    let redeemer = () 
+    let redeemer = True 
         ppkh     = walletOwner contractInfo
         tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> collectFromScript utxos redeemer
 
