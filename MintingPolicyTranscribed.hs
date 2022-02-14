@@ -3,6 +3,7 @@ import           Data.Aeson             (ToJSON, FromJSON)
 import           Data.Text              (Text)
 import           Data.Void              (Void)
 import           GHC.Generics           (Generic)
+import           Data.Map              as Map hiding (foldl)
 import           Plutus.Contract        
 import           Plutus.Contract        as Contract
 import           Ledger.Address         as Add
@@ -31,6 +32,7 @@ import           Prelude              ((/), Float, toInteger, floor)
 import           Cardano.Api hiding (Value, TxOut,Address)
 import           Cardano.Api.Shelley hiding (Value, TxOut, Address)
 import           Codec.Serialise hiding (encode)
+import           Plutus.ChainIndex as Chain
 
 
 
@@ -63,7 +65,7 @@ instance Scripts.ValidatorTypes LootBoxData where
 --If never changed by the end of the project use the builtins script validator
 {-# INLINABLE mkValidator #-}
 mkValidator :: Integer -> () -> ScriptContext -> Bool
-mkValidator _ _ ctx = True
+mkValidator i x ctx = True
 
 lootBox :: Scripts.TypedValidator LootBoxData
 lootBox = Scripts.mkTypedValidator @LootBoxData
@@ -138,11 +140,15 @@ purchase :: () -> Contract w SignedSchema Text ()
 purchase _ =  do
     utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
 
-    let redeemer = () 
+    let ownOutput = Map.toList utxos
+        redeemer = ()
         ppkh     = walletOwner contractInfo
+        -- use mustSpendScriptOutput not CollectFromScript
         tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> collectFromScript utxos redeemer
 
     void (submitTxConstraintsSpending lootBox utxos tx)
+
+-- Sort through the Utxos so that it only collect the right one
 
 endpoints :: Contract () SignedSchema Text ()
 endpoints = awaitPromise (mint' `select` lock' `select` purchase') >> endpoints
