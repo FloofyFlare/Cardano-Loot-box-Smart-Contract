@@ -3,6 +3,7 @@ import           Data.Aeson             (ToJSON, FromJSON)
 import           Data.Text              (Text)
 import           Data.Void              (Void)
 import           GHC.Generics           (Generic)
+import           Data.Map              as Map hiding (foldl)
 import           Plutus.Contract        
 import           Plutus.Contract        as Contract
 import           Ledger.Address         as Add
@@ -31,7 +32,7 @@ import           Prelude              ((/), Float, toInteger, floor)
 import           Cardano.Api hiding (Value, TxOut,Address)
 import           Cardano.Api.Shelley hiding (Value, TxOut, Address)
 import           Codec.Serialise hiding (encode)
-
+import           Plutus.ChainIndex as Chain
 
 
 
@@ -57,33 +58,20 @@ contractInfo = ContractInfo
 --purchase portion of the contract 
 data LootBoxData
 instance Scripts.ValidatorTypes LootBoxData where
-    type instance RedeemerType LootBoxData = Bool
+    type instance RedeemerType LootBoxData = ()
     type instance DatumType LootBoxData = Integer
 
 --Checks the validatorHash to make sure the LootBox has tokens to host the transaction
 --If never changed by the end of the project use the builtins script validator
 {-# INLINABLE mkValidator #-}
-mkValidator :: Integer -> Bool -> ScriptContext -> Bool
-mkValidator i x ctx = case x of 
-                    True -> ownTxInfo == i
-                    False -> True
-    where
-    -- TxInfo
-        ownTxInfop :: TxInfo
-        ownTxInfop = scriptContextTxInfo ctx
-
-    -- TxInInfo
-        ownTxInfo :: Integer
-        ownTxInfo = case findOwnInput ctx of
-            Nothing -> 1
-            Just a -> txOutRefIdx $ txInInfoOutRef a 
-        
+mkValidator :: Integer -> () -> ScriptContext -> Bool
+mkValidator i x ctx = True
 
 lootBox :: Scripts.TypedValidator LootBoxData
 lootBox = Scripts.mkTypedValidator @LootBoxData
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator @Integer @Bool
+        wrap = Scripts.wrapValidator @Integer @()
 
 valHash :: Ledger.ValidatorHash
 valHash = Scripts.validatorHash lootBox
@@ -150,13 +138,17 @@ lock mp =  do
 
 purchase :: () -> Contract w SignedSchema Text ()
 purchase _ =  do
-    utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
-
-    let redeemer = True 
+    utxos <- utxosAt valAddress
+    let outputs = Map.toList utxos
+        ownOutput = fst $ head outputs
         ppkh     = walletOwner contractInfo
-        tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> collectFromScript utxos redeemer
+        lookups = Constraints.typedValidatorLookups lootBox <> Constraints.unspentOutputs utxos
+        tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> mustSpendScriptOutput ownOutput (Redeemer $ Builtins.mkI 0)
+    utx  <- mkTxConstraints lookups tx
+    txid <- getCardanoTxId <$> submitUnbalancedTx (Constraints.adjustUnbalancedTx utx) 
+    void $ awaitTxConfirmed txid
 
-    void (submitTxConstraintsSpending lootBox utxos tx)
+-- Sort through the Utxos so that it only collect the right one
 
 endpoints :: Contract () SignedSchema Text ()
 endpoints = awaitPromise (mint' `select` lock' `select` purchase') >> endpoints
