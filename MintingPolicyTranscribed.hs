@@ -9,7 +9,6 @@ import           Plutus.Contract        as Contract
 import           Ledger.Address         as Add
 import           Plutus.Trace.Emulator  as Emulator
 import qualified PlutusTx
-import           PlutusTx.Prelude       hiding (Semigroup(..), unless)
 import           Ledger                 hiding (mint, singleton)
 import           Ledger.Constraints     as Constraints
 import qualified Ledger.Typed.Scripts   as Scripts
@@ -20,7 +19,6 @@ import           Playground.Types       (KnownCurrency (..))
 import           Prelude                (IO, Show (..), String)
 import           Text.Printf            (printf)
 import           Wallet.Emulator.Wallet
-import           PlutusTx.Prelude
 import           Wallet.Effects         as Effects
 import qualified PlutusTx.Builtins      as Builtins
 import           Plutus.V1.Ledger.Ada as Ada
@@ -28,11 +26,14 @@ import           Ledger.Tx              (scriptTxOut, ChainIndexTxOut)
 import           Plutus.ChainIndex.Tx 
 import           Ledger.Blockchain 
 import           Playground.Contract
-import           Prelude              ((/), Float, toInteger, floor)
+import           PlutusTx.Prelude     hiding (Semigroup(..), unless)
+import           Prelude              (IO, Semigroup (..), String, Show(..))
+import qualified Prelude              as Haskell
 import           Cardano.Api hiding (Value, TxOut,Address)
 import           Cardano.Api.Shelley hiding (Value, TxOut, Address)
 import           Codec.Serialise hiding (encode)
 import           Plutus.ChainIndex as Chain
+
 
 
 
@@ -71,7 +72,7 @@ lootBox :: Scripts.TypedValidator LootBoxData
 lootBox = Scripts.mkTypedValidator @LootBoxData
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator @Integer
+        wrap = Scripts.wrapValidator @Integer @()
 
 valHash :: Ledger.ValidatorHash
 valHash = Scripts.validatorHash lootBox
@@ -138,15 +139,18 @@ lock mp =  do
 
 purchase :: () -> Contract w SignedSchema Text ()
 purchase _ =  do
-    utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
-
-    let ownOutput = Map.toList utxos
-        redeemer = ()
+    utxos <- utxosAt valAddress
+    
+    let outputs = Map.toList utxos
+        r      = Redeemer $ PlutusTx.toBuiltinData ()
+        (oref, o) = head outputs
         ppkh     = walletOwner contractInfo
-        -- use mustSpendScriptOutput not CollectFromScript
-        tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> collectFromScript utxos redeemer
-
-    void (submitTxConstraintsSpending lootBox utxos tx)
+        lookups = Constraints.unspentOutputs utxos <>
+                  Constraints.otherScript validate
+        tx      = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> mconcat [Constraints.mustSpendScriptOutput oref unitRedeemer ] 
+    ledgerTx <- submitTxConstraintsWith @Void lookups tx
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+    logInfo @String $ "loot box used"
 
 -- Sort through the Utxos so that it only collect the right one
 
