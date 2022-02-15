@@ -1,15 +1,4 @@
-mustPayToPubKey
-
-purchase :: forall w s e. AsContractError e => MintParams -> Contract w s e ()
-purchase mp = do
-    utxos <- fundsAtAddressGeq valAddress (Ada.lovelaceValueOf 1)
-    let orefs   = fst <$> Map.toList utxos
-        lookups = Constraints.otherScript validate
-        tx :: TxConstraints Void Void
-        tx      = mconcat [mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toBuiltinData () | oref <- orefs]
-    ledgerTx <- submitTxConstraintsWith @Void lookups tx
-    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
- import           Control.Monad          hiding (fmap)
+import           Control.Monad          hiding (fmap)
 import           Data.Aeson             (ToJSON, FromJSON)
 import           Data.Text              (Text)
 import           Data.Void              (Void)
@@ -20,7 +9,6 @@ import           Plutus.Contract        as Contract
 import           Ledger.Address         as Add
 import           Plutus.Trace.Emulator  as Emulator
 import qualified PlutusTx
-import           PlutusTx.Prelude       hiding (Semigroup(..), unless)
 import           Ledger                 hiding (mint, singleton)
 import           Ledger.Constraints     as Constraints
 import qualified Ledger.Typed.Scripts   as Scripts
@@ -31,7 +19,6 @@ import           Playground.Types       (KnownCurrency (..))
 import           Prelude                (IO, Show (..), String)
 import           Text.Printf            (printf)
 import           Wallet.Emulator.Wallet
-import           PlutusTx.Prelude
 import           Wallet.Effects         as Effects
 import qualified PlutusTx.Builtins      as Builtins
 import           Plutus.V1.Ledger.Ada as Ada
@@ -39,11 +26,14 @@ import           Ledger.Tx              (scriptTxOut, ChainIndexTxOut)
 import           Plutus.ChainIndex.Tx 
 import           Ledger.Blockchain 
 import           Playground.Contract
-import           Prelude              ((/), Float, toInteger, floor)
+import           PlutusTx.Prelude     hiding (Semigroup(..), unless)
+import           Prelude              (IO, Semigroup (..), String, Show(..))
+import qualified Prelude              as Haskell
 import           Cardano.Api hiding (Value, TxOut,Address)
 import           Cardano.Api.Shelley hiding (Value, TxOut, Address)
 import           Codec.Serialise hiding (encode)
 import           Plutus.ChainIndex as Chain
+
 
 
 
@@ -111,20 +101,20 @@ policy pkh = mkMintingPolicyScript $
 curSymbol :: PubKeyHash -> CurrencySymbol
 curSymbol = scriptCurrencySymbol . policy
 
-data MintParams = MintParams
+data AmountParams = AmountParams
     { mpAmount    :: !Integer
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
-PlutusTx.makeLift ''MintParams
+PlutusTx.makeLift ''AmountParams
 
 
 --Start of endpoints
 type SignedSchema = 
-    Endpoint "mint" MintParams
-     .\/ Endpoint "lock" MintParams
-     .\/ Endpoint "purchase" ()
+    Endpoint "mint" AmountParams
+     .\/ Endpoint "lock" AmountParams
+     .\/ Endpoint "purchase" AmountParams
 
-mint :: AsContractError e => MintParams -> Contract w s e ()
+mint :: AsContractError e => AmountParams -> Contract w s e ()
 mint mp = do
     ppkh <- Contract.ownPaymentPubKeyHash
     let pkh     = unPaymentPubKeyHash ppkh
@@ -135,7 +125,7 @@ mint mp = do
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
     logInfo @String $ printf "forged %s" (show val)
 
-lock :: MintParams -> Contract w SignedSchema Text ()
+lock :: AmountParams -> Contract w SignedSchema Text ()
 lock mp =  do
 -- make a recusive function that allows for the creation of a 1000 utxos of diffrent datums from a wallet (cheap if implemented correctly) 
         
@@ -147,17 +137,22 @@ lock mp =  do
                 
     void (submitTxConstraints lootBox tx)
 
-purchase :: () -> Contract w SignedSchema Text ()
+purchase :: AmountParams -> Contract w SignedSchema Text ()
 purchase _ =  do
     utxos <- utxosAt valAddress
     
     let outputs = Map.toList utxos
         r      = Redeemer $ PlutusTx.toBuiltinData ()
         (oref, o) = head outputs
-        ownUOutput = Map.singleton oref o
         ppkh     = walletOwner contractInfo
-        tx       = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> collectFromScript ownUOutput ()
-    void (submitTxConstraints lootBox tx)
+        ownOutput = Map.singleton oref o
+        lookups = Constraints.unspentOutputs utxos <>
+                  Constraints.otherScript validate <>
+                  Constraints.typedValidatorLookups lootBox
+        tx      = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> mconcat [Constraints.mustSpendScriptOutput oref unitRedeemer ] 
+    ledgerTx <- submitTxConstraintsWith @LootBoxData lookups tx
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+    logInfo @String $ "loot box used"
 
 -- Sort through the Utxos so that it only collect the right one
 
