@@ -145,10 +145,12 @@ purchase _ =  do
         r      = Redeemer $ PlutusTx.toBuiltinData ()
         (oref, o) = head outputs
         ppkh     = walletOwner contractInfo
+        ownOutput = Map.singleton oref o
         lookups = Constraints.unspentOutputs utxos <>
-                  Constraints.otherScript validate
+                  Constraints.otherScript validate <>
+                  Constraints.typedValidatorLookups lootBox
         tx      = mustPayToPubKey (Add.PaymentPubKeyHash ppkh) price <> mconcat [Constraints.mustSpendScriptOutput oref unitRedeemer ] 
-    ledgerTx <- submitTxConstraintsWith @Void lookups tx
+    ledgerTx <- submitTxConstraintsWith @LootBoxData lookups tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
     logInfo @String $ "loot box used"
 
