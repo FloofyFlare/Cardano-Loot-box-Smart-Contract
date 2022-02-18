@@ -101,39 +101,45 @@ policy pkh = mkMintingPolicyScript $
 curSymbol :: PubKeyHash -> CurrencySymbol
 curSymbol = scriptCurrencySymbol . policy
 
-data MintParams = MintParams
-    { mpAmount    :: !Integer
+data AmountParams = AmountParams
+    { apAmount    :: !Integer
     } deriving (Generic, ToJSON, FromJSON, ToSchema)
 
-PlutusTx.makeLift ''MintParams
+PlutusTx.makeLift ''AmountParams
 
+data LockParams = LockParams
+    { lpDatum    :: !Integer
+    , lpTokensPerOutput   :: !Integer
+    } deriving (Generic, ToJSON, FromJSON, ToSchema)
+
+PlutusTx.makeLift ''LockParams
 
 --Start of endpoints
 type SignedSchema = 
-    Endpoint "mint" MintParams
-     .\/ Endpoint "lock" MintParams
+    Endpoint "mint" AmountParams
+     .\/ Endpoint "lock" LockParams
      .\/ Endpoint "purchase" ()
 
-mint :: AsContractError e => MintParams -> Contract w s e ()
-mint mp = do
+mint :: AsContractError e => AmountParams -> Contract w s e ()
+mint ap = do
     ppkh <- Contract.ownPaymentPubKeyHash
     let pkh     = unPaymentPubKeyHash ppkh
-        val     = Value.singleton (curSymbol pkh) (nameOfToken contractInfo) (mpAmount mp)
+        val     = Value.singleton (curSymbol pkh) (nameOfToken contractInfo) (apAmount ap)
         lookups = Constraints.mintingPolicy $ policy (pkh)
         tx      = Constraints.mustMintValue val
     ledgerTx <- submitTxConstraintsWith @Void lookups tx
     void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
     logInfo @String $ printf "forged %s" (show val)
 
-lock :: MintParams -> Contract w SignedSchema Text ()
-lock mp =  do
+lock :: LockParams -> Contract w SignedSchema Text ()
+lock lp =  do
 -- make a recusive function that allows for the creation of a 1000 utxos of diffrent datums from a wallet (cheap if implemented correctly) 
         
-    let v   = Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (mpAmount mp) <> minADA
+    let v   = Value.singleton (policyID contractInfo) (nameOfToken contractInfo) (lpTokensPerOutput lp) <> minADA
         tx  =   foldl
                 (\acc i -> acc <> (Constraints.mustPayToTheScript (i) $ v))
                 (TxConstraints [] [] [])
-                [1..1000]
+                [(lpDatum lp * 1000)..((lpDatum lp +1) * 1000 -1)]
                 
     void (submitTxConstraints lootBox tx)
 
@@ -145,7 +151,6 @@ purchase _ =  do
         r      = Redeemer $ PlutusTx.toBuiltinData ()
         (oref, o) = head outputs
         ppkh     = walletOwner contractInfo
-        ownOutput = Map.singleton oref o
         lookups = Constraints.unspentOutputs utxos <>
                   Constraints.otherScript validate <>
                   Constraints.typedValidatorLookups lootBox
