@@ -146,7 +146,7 @@ lock lp =  do
 purchase :: () -> Contract w SignedSchema Text ()
 purchase _ =  do
     utxos <- utxosAt valAddress
-    
+    unless (Haskell.null utxos) $ do
     let outputs = Map.toList utxos
         r      = Redeemer $ PlutusTx.toBuiltinData ()
         (oref, o) = head outputs
