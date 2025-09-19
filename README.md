@@ -5,4 +5,4 @@ A loot box smart contract written in Haskell for the Cardano PAF
 - lock: locks value to the validation script 
 - purchase: allows the purchase of a specified number of units of a stored value on the contract
 
-Research Paper written on this code and its applications: https://docs.google.com/document/d/1_NnML4bxlfW2sb9GOunauhflInFMMnE1BUo3OhDTtYY/edit?usp=sharing
+Research Paper written on this code and its applications: [https://docs.google.com/document/d/1_NnML4bxlfW2sb9GOunauhflInFMMnE1BUo3OhDTtYY/edit?usp=sharing](https://docs.google.com/document/d/1LYt78kO3V1mbSgSY_UKWa3Vf55GdtG76mMeVVjGLExo/edit?usp=sharing)
